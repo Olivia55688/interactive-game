@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Teachable Machine 小恐龍跳躍遊戲</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f4f6f8;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    h1 {
+      margin-bottom: 12px;
+      font-size: 1.5rem;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      width: 100%;
+      max-width: 800px;
+    }
+    /* 遊戲畫布 */
+    #gameCanvas {
+      background: #ffffff;
+      border: 2px solid #444;
+      border-radius: 8px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.1);
+      width: 100%;
+      max-width: 800px;
+      height: 250px;
+    }
+    /* 控制面板 */
+    .dashboard {
+      display: grid;
+      grid-template-columns: 200px 1fr;
+      gap: 16px;
+      width: 100%;
+      background: #fff;
+      padding: 16px;
+      border-radius: 8px;
+      border: 1px solid #ddd;
+    }
+    @media (max-width: 650px) {
+      .dashboard {
+        grid-template-columns: 1fr;
+      }
+    }
+    .webcam-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+    #webcam-container {
+      width: 200px;
+      height: 150px;
+      background: #222;
+      border-radius: 6px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #aaa;
+      font-size: 0.8rem;
+    }
+    #webcam-container canvas {
+      width: 100% !important;
+      height: 100% !important;
+      object-fit: cover;
+    }
+    .metrics {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .control-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      background: #f8fafc;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid #e2e8f0;
+      font-size: 0.85rem;
+    }
+    select, input[type="range"] {
+      cursor: pointer;
+    }
+    select {
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: 1px solid #cbd5e1;
+      font-weight: 600;
+    }
+    .status-text {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #2563eb;
+    }
+    .label-bar-container {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .bar-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+    }
+    .bar-bg {
+      flex: 1;
+      height: 12px;
+      background: #e2e8f0;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%;
+      width: 0%;
+      background: #94a3b8;
+      transition: width 0.05s linear;
+    }
+    .bar-fill.target {
+      background: #10b981;
+    }
+    .bar-fill.triggered {
+      background: #ef4444 !important;
+    }
+    .instructions {
+      font-size: 0.85rem;
+      color: #64748b;
+      text-align: center;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+</head>
+<body>
+
+  <div class="container">
+    <h1>🦖 Teachable Machine 小恐龍跳躍遊戲</h1>
+    
+    <canvas id="gameCanvas" width="800" height="250"></canvas>
+
+    <div class="dashboard">
+      <div class="webcam-box">
+        <div id="webcam-container">攝影機載入中...</div>
+      </div>
+      
+      <div class="metrics">
+        <div class="status-text" id="status">正在下載模型資料...</div>
+
+        <!-- 動作選擇與靈敏度調節區 -->
+        <div class="control-row">
+          <label for="jumpSelect"><b>跳躍觸發類別：</b></label>
+          <select id="jumpSelect"><option>載入中...</option></select>
+          
+          <label for="thresholdInput" style="margin-left: 10px;">靈敏度門檻：</label>
+          <input type="range" id="thresholdInput" min="0.5" max="0.95" step="0.05" value="0.70">
+          <span id="thresholdVal" style="font-weight: bold; width: 35px;">70%</span>
+        </div>
+
+        <!-- 類別機率顯示條 -->
+        <div id="label-container" class="label-bar-container"></div>
+      </div>
+    </div>
+
+    <div class="instructions">
+      💡 提示：在上方選單選擇你在 Teachable Machine 中代表「跳躍」的類別。平時亦可按 <b>空白鍵</b> 或 <b>上方向鍵</b> 跳躍。
+    </div>
+  </div>
+
+  <script>
+    // --- 模型配置 ---
+    const MODEL_URL = "https://teachablemachine.withgoogle.com/models/1A2X53XtF/";
+    let JUMP_CONFIDENCE_THRESHOLD = 0.70; // 預設 70% 信心度即觸發
+    const JUMP_COOLDOWN_MS = 400;           // 冷卻時間防止連續誤觸
+
+    let model, webcam, maxPredictions;
+    let jumpClassIndex = 0;
+    let lastJumpTime = 0;
+    let isModelReady = false;
+
+    // --- 遊戲物理與畫布 ---
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    let gameState = "START"; // "START", "PLAYING", "GAMEOVER"
+    let score = 0;
+    let gameSpeed = 5;
+
+    const dino = {
+      x: 60,
+      y: 190,
+      width: 40,
+      height: 40,
+      vy: 0,
+      gravity: 0.85,
+      jumpForce: -13,
+      isGrounded: true
+    };
+
+    let obstacles = [];
+    let spawnTimer = 0;
+
+    // --- 跳躍觸發核心 ---
+    function triggerJump() {
+      const now = performance.now();
+      if (now - lastJumpTime < JUMP_COOLDOWN_MS) return;
+
+      if (gameState === "PLAYING") {
+        if (dino.isGrounded) {
+          dino.vy = dino.jumpForce;
+          dino.isGrounded = false;
+          lastJumpTime = now;
+        }
+      } else if (gameState === "GAMEOVER" || gameState === "START") {
+        resetGame();
+        gameState = "PLAYING";
+        lastJumpTime = now;
+      }
+    }
+
+    // 鍵盤監聽降級備用
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "Space" || e.code === "ArrowUp") {
+        e.preventDefault();
+        triggerJump();
+      }
+    });
+
+    function resetGame() {
+      score = 0;
+      gameSpeed = 5;
+      obstacles = [];
+      dino.y = 190;
+      dino.vy = 0;
+      dino.isGrounded = true;
+      spawnTimer = 0;
+    }
+
+    // --- 獨立 60FPS 遊戲迴圈 ---
+    function updateGame() {
+      if (gameState === "PLAYING") {
+        score++;
+        if (score % 400 === 0) gameSpeed += 0.5;
+
+        // 重力與位移
+        dino.vy += dino.gravity;
+        dino.y += dino.vy;
+        if (dino.y >= 190) {
+          dino.y = 190;
+          dino.vy = 0;
+          dino.isGrounded = true;
+        }
+
+        // 障礙物生成
+        spawnTimer++;
+        if (spawnTimer > Math.max(65, 120 - Math.floor(score / 150))) {
+          obstacles.push({
+            x: canvas.width,
+            y: 195,
+            width: 22 + Math.random() * 12,
+            height: 35
+          });
+          spawnTimer = 0;
+        }
+
+        // 碰撞檢測與位移
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+          const obs = obstacles[i];
+          obs.x -= gameSpeed;
+
+          if (
+            dino.x < obs.x + obs.width &&
+            dino.x + dino.width > obs.x &&
+            dino.y < obs.y + obs.height &&
+            dino.y + dino.height > obs.y
+          ) {
+            gameState = "GAMEOVER";
+          }
+
+          if (obs.x + obs.width < 0) {
+            obstacles.splice(i, 1);
+          }
+        }
+      }
+    }
+
+    function renderGame() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 地面
+      ctx.strokeStyle = "#64748b";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, 230);
+      ctx.lineTo(canvas.width, 230);
+      ctx.stroke();
+
+      // 小恐龍
+      ctx.fillStyle = "#16a34a";
+      ctx.fillRect(dino.x, dino.y, dino.width, dino.height);
+
+      // 仙人掌
+      ctx.fillStyle = "#dc2626";
+      for (const obs of obstacles) {
+        ctx.fillRect(obs.x, obs.y, obs.width, obs.height);
+      }
+
+      // 分數
+      ctx.fillStyle = "#1e293b";
+      ctx.font = "bold 16px monospace";
+      ctx.fillText(`SCORE: ${Math.floor(score / 5)}`, canvas.width - 140, 30);
+
+      // 遊戲狀態提示
+      if (gameState === "START") {
+        ctx.fillStyle = "#334155";
+        ctx.font = "18px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("做跳躍動作 或 按空白鍵開始遊戲", canvas.width / 2, canvas.height / 2);
+        ctx.textAlign = "left";
+      } else if (gameState === "GAMEOVER") {
+        ctx.fillStyle = "#dc2626";
+        ctx.font = "bold 26px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 10);
+        ctx.fillStyle = "#475569";
+        ctx.font = "16px sans-serif";
+        ctx.fillText("做跳躍動作 或 按空白鍵重新開局", canvas.width / 2, canvas.height / 2 + 25);
+        ctx.textAlign = "left";
+      }
+    }
+
+    function gameLoop() {
+      updateGame();
+      renderGame();
+      requestAnimationFrame(gameLoop);
+    }
+    requestAnimationFrame(gameLoop);
+
+    // --- Teachable Machine 核心載入與事件綁定 ---
+    async function initML() {
+      const statusEl = document.getElementById("status");
+      const labelContainer = document.getElementById("label-container");
+      const jumpSelect = document.getElementById("jumpSelect");
+      const thresholdInput = document.getElementById("thresholdInput");
+      const thresholdVal = document.getElementById("thresholdVal");
+
+      // 監聽門檻滑桿
+      thresholdInput.addEventListener("input", (e) => {
+        JUMP_CONFIDENCE_THRESHOLD = parseFloat(e.target.value);
+        thresholdVal.innerText = `${Math.round(JUMP_CONFIDENCE_THRESHOLD * 100)}%`;
+      });
+
+      try {
+        const modelJsonUrl = MODEL_URL + "model.json";
+        const metadataUrl = MODEL_URL + "metadata.json";
+
+        model = await tmImage.load(modelJsonUrl, metadataUrl);
+        maxPredictions = model.getTotalClasses();
+        const classLabels = model.getClassLabels();
+
+        // 智慧選取推測跳躍的類別
+        jumpClassIndex = 0;
+        const jumpKeywords = ["jump", "up", "跳", "動", "action", "舉手", "2", "二"];
+        for (let i = 0; i < maxPredictions; i++) {
+          const name = classLabels[i].toLowerCase();
+          if (jumpKeywords.some(kw => name.includes(kw))) {
+            jumpClassIndex = i;
+            break;
+          }
+        }
+        // 如果都沒對上，且有 2 個類別以上，預設選第 2 個（通常第一個是待機 Idle/背景）
+        if (jumpClassIndex === 0 && maxPredictions > 1) {
+          jumpClassIndex = 1;
+        }
+
+        // 動態注入下拉選單選項
+        jumpSelect.innerHTML = "";
+        classLabels.forEach((name, idx) => {
+          const opt = document.createElement("option");
+          opt.value = idx;
+          opt.innerText = `[Class ${idx}] ${name}`;
+          if (idx === jumpClassIndex) opt.selected = true;
+          jumpSelect.appendChild(opt);
+        });
+
+        jumpSelect.addEventListener("change", (e) => {
+          jumpClassIndex = parseInt(e.target.value);
+          updateBarHighlight();
+        });
+
+        // 啟動鏡頭
+        const flip = true;
+        webcam = new tmImage.Webcam(200, 150, flip);
+        await webcam.setup();
+        await webcam.play();
+
+        const webcamContainer = document.getElementById("webcam-container");
+        webcamContainer.innerHTML = "";
+        webcamContainer.appendChild(webcam.canvas);
+
+        // 建立各類別的信心度長條圖
+        labelContainer.innerHTML = "";
+        for (let i = 0; i < maxPredictions; i++) {
+          const barWrap = document.createElement("div");
+          barWrap.className = "bar-wrap";
+          barWrap.innerHTML = `
+            <span style="width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${classLabels[i]}:</span>
+            <div class="bar-bg"><div class="bar-fill" id="bar-${i}"></div></div>
+            <span id="val-${i}" style="width: 45px; text-align: right; font-family: monospace;">0%</span>
+          `;
+          labelContainer.appendChild(barWrap);
+        }
+
+        updateBarHighlight();
+        statusEl.innerText = `模型就緒！目前綁定跳躍動作:「${classLabels[jumpClassIndex]}」`;
+        isModelReady = true;
+
+        predictLoop();
+      } catch (err) {
+        console.error(err);
+        statusEl.innerText = "無法載入鏡頭或模型，請確認本機以 HTTP 伺服器運行，或直接用空白鍵遊玩。";
+      }
+    }
+
+    function updateBarHighlight() {
+      for (let i = 0; i < maxPredictions; i++) {
+        const bar = document.getElementById(`bar-${i}`);
+        if (bar) {
+          if (i === jumpClassIndex) {
+            bar.classList.add("target");
+          } else {
+            bar.classList.remove("target");
+          }
+        }
+      }
+    }
+
+    // --- 推論迴圈 ---
+    async function predictLoop() {
+      if (!isModelReady) return;
+      webcam.update();
+
+      const prediction = await model.predict(webcam.canvas);
+
+      for (let i = 0; i < maxPredictions; i++) {
+        const prob = prediction[i].probability;
+        const bar = document.getElementById(`bar-${i}`);
+        const val = document.getElementById(`val-${i}`);
+
+        if (bar && val) {
+          bar.style.width = (prob * 100).toFixed(0) + "%";
+          val.innerText = (prob * 100).toFixed(0) + "%";
+
+          // 若為目標類別且達到觸發門檻，標記紅色並跳躍
+          if (i === jumpClassIndex) {
+            if (prob >= JUMP_CONFIDENCE_THRESHOLD) {
+              bar.classList.add("triggered");
+              triggerJump();
+            } else {
+              bar.classList.remove("triggered");
+            }
+          }
+        }
+      }
+
+      requestAnimationFrame(predictLoop);
+    }
+
+    window.addEventListener("DOMContentLoaded", initML);
+  </script>
+</body>
+</html>
